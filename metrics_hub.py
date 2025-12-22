@@ -8,14 +8,24 @@ What it does:
 - end run on first target/alert (digit '5')
 - prompt user: algorithm id (int), message error (0..1 float), collision/real (c/r)
   - if collision: prompt for correct target location "x,y"
-- export 3 CSV files:
-  <alg>_<x,y>_<errpct>_sys.csv
-  <alg>_<x,y>_<errpct>_robots.csv
-  <alg>_<x,y>_<errpct>_locs.csv
+- export 2 CSV files (append mode; one set per algorithm):
+  <alg>_sys.csv
+  <alg>_robots.csv
+
+Each trial appends:
+- 1 row to <alg>_sys.csv
+- 1 row per robot to <alg>_robots.csv
 
 Coordinate payload expected: "x,y-" (hyphen optional); we strip '-'
 CSV coordinate storage uses "x/y" to avoid Excel splitting columns.
-Filenames use "x,y" as you requested.
+
+This script folds the old "locations" file into:
+- System metrics: a single field containing all clue coordinates as a list of tuples.
+- Robot metrics: per-robot clue list, per-robot position at first clue, and a per-robot
+  flag for whether that robot found the target.
+
+Clue/target messages are still printed live to the terminal during the trial, but all
+CSV fields are written only once at the end of the trial.
 """
 
 import csv
@@ -42,6 +52,16 @@ OUT_DIR = "./hub_logs"
 # ---- Helpers ----
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
+
+
+def csv_append(path: str, header: List[str], rows: List[List[object]]) -> None:
+    """Append rows to a CSV, writing header once if the file is new/empty."""
+    write_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(header)
+        w.writerows(rows)
 
 
 def now_s() -> float:
@@ -74,21 +94,13 @@ def cell_csv(x: int, y: int) -> str:
     return f"{x}/{y}"
 
 
-def cell_fname(x: int, y: int) -> str:
-    # as requested for filename
-    return f"{x},{y}"
-
-
-def prompt_int(msg: str, min_val: int = 1) -> int:
+def prompt_name(msg: str) -> str:
+    """Prompt for a short algorithm ID like VP/DP/AC (2 characters)."""
     while True:
-        s = input(msg).strip()
-        try:
-            v = int(s)
-            if v >= min_val:
-                return v
-        except ValueError:
-            pass
-        print(f"Enter an integer >= {min_val}.")
+        s = input(msg).strip().upper()
+        if len(s) == 2 and s.isalnum():
+            return s
+        print("Enter a 2-character algorithm ID (example: VP, DP, AC).")
 
 
 def prompt_float_0_1(msg: str) -> float:
@@ -130,6 +142,8 @@ def make_robot_state() -> Dict:
         "steps_postclue": 0,
         "visited": set(),               # set[(x,y)]
         "revisits": 0,
+        "clues": [],                    # list[(x,y)] found by this robot
+        "found_target": "n",            # 'y' if this robot reported the target
         "msg_by_digit": {d: 0 for d in "123456"},
     }
 
@@ -197,6 +211,10 @@ def main() -> None:
     def handle_clue(rid: str, cell: Tuple[int, int], t_rel: float) -> None:
         nonlocal t_first_clue, first_clue_loc, pos_at_first_clue
         clue_locs.append(cell)
+        robots[rid]["clues"].append(cell)
+
+        # Live terminal feedback during trial (no timestamps written to CSV)
+        print(f"[CLUE] {rid} @ {cell}")
 
         if t_first_clue is None:
             t_first_clue = t_rel
@@ -212,6 +230,7 @@ def main() -> None:
         t_end = t_rel
         end_reporter = rid
         end_loc_reported = cell
+        robots[rid]["found_target"] = "y"
         print(f"[RUN] End t={t_rel:.3f}s loc={cell} from {rid}")
         done_flag["done"] = True
 
@@ -283,7 +302,7 @@ def main() -> None:
         return
 
     # Prompts
-    alg = prompt_int("Algorithm (1,2,3,...): ", 1)
+    alg = prompt_name("Algorithm (VP,DP,AC): ")
     err = prompt_float_0_1("Message error (0..1, e.g. 0.15): ")
     ct = prompt_choice('Enter "r" (real target) or "c" (collision): ', {"r", "c"})
 
@@ -294,12 +313,14 @@ def main() -> None:
     else:
         target_loc = end_loc_reported
 
-    errpct = int(round(err * 100))
-    base = f"{alg}_{cell_fname(*target_loc)}_{errpct:02d}"
+    # One set of files per algorithm; append one trial per run.
+    sys_path = os.path.join(OUT_DIR, f"{alg}_sys.csv")
+    robots_path = os.path.join(OUT_DIR, f"{alg}_robots.csv")
 
-    sys_path = os.path.join(OUT_DIR, f"{base}_sys.csv")
-    robots_path = os.path.join(OUT_DIR, f"{base}_robots.csv")
-    locs_path = os.path.join(OUT_DIR, f"{base}_locs.csv")
+    # Fold "locations" into system + robot fields
+    def fmt_tuple_list(cells: List[Tuple[int, int]]) -> str:
+        # CSV writer will quote this; Excel will treat as a single string cell.
+        return "[" + ",".join(f"({x},{y})" for (x, y) in cells) + "]"
 
     # Compute system metrics in your required order
     cf = "y" if t_first_clue is not None else "n"
@@ -325,6 +346,7 @@ def main() -> None:
         "stbc", "tbc",
         "stac", "tac",
         "uc", "rv",
+        "cl",  # all clue locations, list of tuples
         "msg",
         "m1", "m2", "m3", "m4", "m5", "m6",
     ]
@@ -335,13 +357,11 @@ def main() -> None:
         stbc, round(tbc, 6),
         stac, round(tac, 6),
         uc, rv,
+        fmt_tuple_list(clue_locs),
         msg,
         m1, m2, m3, m4, m5, m6,
     ]
-    with open(sys_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(sys_header)
-        w.writerow(sys_row)
+    csv_append(sys_path, sys_header, [sys_row])
 
     # Write robots CSV
     robots_header = [
@@ -349,60 +369,37 @@ def main() -> None:
         "rid",
         "st", "stbc", "stac",
         "uc", "rv",
+        "cl",      # clues found by this robot (list of tuples)
+        "pfc",     # this robot's position when first clue happened (x/y)
+        "tf",      # did this robot report the target? (y/n)
         "msg",
         "m1", "m2", "m3", "m4", "m5", "m6",
     ]
-    with open(robots_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(robots_header)
-        for rid in ROBOT_IDS:
-            rs = robots[rid]
-            row = [
-                alg, cell_csv(*target_loc), err,
-                rid,
-                rs["steps_total"], rs["steps_preclue"], rs["steps_postclue"],
-                len(rs["visited"]), rs["revisits"],
-                sum(rs["msg_by_digit"].values()),
-                rs["msg_by_digit"]["1"], rs["msg_by_digit"]["2"], rs["msg_by_digit"]["3"],
-                rs["msg_by_digit"]["4"], rs["msg_by_digit"]["5"], rs["msg_by_digit"]["6"],
-            ]
-            w.writerow(row)
-
-    # Write locations CSV (NO target location included in location rows; identifier columns still include tgt)
-    # Includes:
-    # - first clue (fc)
-    # - all clues (cl)
-    # - robot positions at first clue (pfc)
-    # - final robot positions (pf)
-    locs_header = ["alg", "tgt", "err", "ct", "type", "idx", "rid", "loc"]
-    rows: List[List[object]] = []
-
-    if first_clue_loc is not None:
-        rows.append([alg, cell_csv(*target_loc), err, ct, "fc", 1, "", cell_csv(*first_clue_loc)])
-
-    for i, (cx, cy) in enumerate(clue_locs, start=1):
-        rows.append([alg, cell_csv(*target_loc), err, ct, "cl", i, "", cell_csv(cx, cy)])
-
-    if pos_at_first_clue is not None:
-        for rid in ROBOT_IDS:
+    robot_rows: List[List[object]] = []
+    for rid in ROBOT_IDS:
+        rs = robots[rid]
+        pfc = ""
+        if pos_at_first_clue is not None:
             p = pos_at_first_clue.get(rid)
             if p is not None:
-                rows.append([alg, cell_csv(*target_loc), err, ct, "pfc", 0, rid, cell_csv(*p)])
-
-    for rid in ROBOT_IDS:
-        lp = robots[rid]["last_pos"]
-        if lp is not None:
-            rows.append([alg, cell_csv(*target_loc), err, ct, "pf", 0, rid, cell_csv(*lp)])
-
-    with open(locs_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(locs_header)
-        w.writerows(rows)
+                pfc = cell_csv(*p)
+        robot_rows.append([
+            alg, cell_csv(*target_loc), err,
+            rid,
+            rs["steps_total"], rs["steps_preclue"], rs["steps_postclue"],
+            len(rs["visited"]), rs["revisits"],
+            fmt_tuple_list(rs["clues"]),
+            pfc,
+            rs["found_target"],
+            sum(rs["msg_by_digit"].values()),
+            rs["msg_by_digit"]["1"], rs["msg_by_digit"]["2"], rs["msg_by_digit"]["3"],
+            rs["msg_by_digit"]["4"], rs["msg_by_digit"]["5"], rs["msg_by_digit"]["6"],
+        ])
+    csv_append(robots_path, robots_header, robot_rows)
 
     print("\n[OK] Wrote:")
     print(" ", sys_path)
     print(" ", robots_path)
-    print(" ", locs_path)
 
 
 if __name__ == "__main__":
