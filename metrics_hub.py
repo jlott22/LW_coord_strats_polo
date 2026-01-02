@@ -6,8 +6,7 @@ What it does:
 - t=0: publish hub/command "1"
 - subscribe to robot topics: 00..03 + digits 1..6 (via '#' + filter)
 - end run on first target/alert (digit '5')
-- prompt user: algorithm id (int), message error (0..1 float), collision/real (c/r)
-  - if collision: prompt for correct target location "x,y"
+- prompt user: algorithm id (int), message error (0..1 float)
 - export 2 CSV files (append mode; one set per algorithm):
   <alg>_sys.csv
   <alg>_robots.csv
@@ -26,13 +25,34 @@ This script folds the old "locations" file into:
 
 Clue/target messages are still printed live to the terminal during the trial, but all
 CSV fields are written only once at the end of the trial.
+
+TODO: fix 2 step discrepancy in logging compared to robot metric and real world observation. 
+- fix: added 1 second a drain time to drain messages sent after target found. Also added position message for robot after communicating target.
+- Needs checking. If not fixed then it is an artifact of using a different measurement. Not sure why that would be. 
+TODO: robot logs 1 more message sent by each robot than hub counts. Due to initial location pulse.
+fix: hoping that message drain above will fix this issue as well. verified that robot does not track message counts prior to start signal. 
+- Needs checking
+TODO: Robots are double checking for clues and logging misses when a clue has already been found at that location. 
+fix: edited robot search loop to check if clue detected in that area previously before checking at_intersection_and_white(). Now has a guard before checking function.  
+- Needs checking and make sure function of code isnt altered. 
+TODO: removed if grid[i] == CELL_OBSTACLE:
+                clue_p[i] = 0.0
+                continue
+from clue_probability_field() in all 3 algorithms. This was preventing clues from being registered on obstacle cells. 
+- Needs checking to make sure behavior isn't erradic.
+TODO: Removed intent penalty code from Auction-Greedy.py to prevent robots from incorportating a penalty based on current and intended locaiton of 
+peers into path planning. 
+- Need to implement peer intent on dynamic-partitioning and voronoi-partitioning.
+- Peer intent alted to only plan a role in next cell planning and gate in all code. removed full path planning affect on 
+long term path planning on auction-greedy. implemented identical system on all code. 
+- Needs checking to verify behavior. Check in chat that changes are correct. 
 """
 
 import csv
 import os
 import re
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
 
@@ -115,24 +135,6 @@ def prompt_float_0_1(msg: str) -> float:
         print("Enter a number between 0 and 1 (example: 0.15).")
 
 
-def prompt_choice(msg: str, choices: Set[str]) -> str:
-    choices = {c.lower() for c in choices}
-    while True:
-        s = input(msg).strip().lower()
-        if s in choices:
-            return s
-        print(f"Enter one of: {sorted(choices)}")
-
-
-def prompt_xy(msg: str) -> Tuple[int, int]:
-    while True:
-        s = input(msg).strip()
-        m = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", s)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        print('Enter as "x,y" (example: 9,15).')
-
-
 # ---- State (simple dicts) ----
 def make_robot_state() -> Dict:
     return {
@@ -168,7 +170,8 @@ def main() -> None:
     msg_total_system = 0
     msg_total_by_digit = {d: 0 for d in "123456"}
 
-    done_flag = {"done": False}  # mutable closure flag
+    done_flag = False  # mutable closure flag
+    drain_time = None
 
     def mark_team_visit(cell: Tuple[int, int]) -> None:
         team_visit_counts[cell] = team_visit_counts.get(cell, 0) + 1
@@ -224,7 +227,7 @@ def main() -> None:
             print(f"[RUN] First clue t={t_rel:.3f}s loc={cell} from {rid}")
 
     def handle_target(rid: str, cell: Tuple[int, int], t_rel: float) -> None:
-        nonlocal t_end, end_reporter, end_loc_reported
+        nonlocal t_end, end_reporter, end_loc_reported, done_flag, drain_time
         if t_end is not None:
             return
         t_end = t_rel
@@ -232,7 +235,8 @@ def main() -> None:
         end_loc_reported = cell
         robots[rid]["found_target"] = "y"
         print(f"[RUN] End t={t_rel:.3f}s loc={cell} from {rid}")
-        done_flag["done"] = True
+        done_flag = True
+        drain_time = time.time()
 
     # MQTT callbacks
     def on_connect(client, userdata, flags, rc):
@@ -288,7 +292,9 @@ def main() -> None:
 
     # Run until done
     try:
-        while not done_flag["done"]:
+        while not done_flag:
+            time.sleep(0.01)
+        while abs(now_s()-drain_time) < 1.0:
             time.sleep(0.01)
     except KeyboardInterrupt:
         print("\n[RUN] Interrupted. No files written.")
@@ -304,14 +310,7 @@ def main() -> None:
     # Prompts
     alg = prompt_name("Algorithm (VP,DP,AC): ")
     err = prompt_float_0_1("Message error (0..1, e.g. 0.15): ")
-    ct = prompt_choice('Enter "r" (real target) or "c" (collision): ', {"r", "c"})
-
-    if ct == "c":
-        print(f"[INFO] Collision location reported: {end_loc_reported}")
-        tx, ty = prompt_xy('Enter correct TRUE target location "x,y": ')
-        target_loc = (tx, ty)
-    else:
-        target_loc = end_loc_reported
+    target_loc = end_loc_reported
 
     # One set of files per algorithm; append one trial per run.
     sys_path = os.path.join(OUT_DIR, f"{alg}_sys.csv")
@@ -341,7 +340,7 @@ def main() -> None:
     # Write system CSV
     sys_header = [
         "alg", "tgt", "err",
-        "ct", "cf",
+        "cf",
         "st", "tt",
         "stbc", "tbc",
         "stac", "tac",
@@ -352,7 +351,7 @@ def main() -> None:
     ]
     sys_row = [
         alg, cell_csv(*target_loc), err,
-        ct, cf,
+        cf,
         st, round(tt, 6),
         stbc, round(tbc, 6),
         stac, round(tac, 6),
@@ -404,3 +403,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
