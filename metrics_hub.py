@@ -25,27 +25,6 @@ This script folds the old "locations" file into:
 
 Clue/target messages are still printed live to the terminal during the trial, but all
 CSV fields are written only once at the end of the trial.
-
-TODO: fix 2 step discrepancy in logging compared to robot metric and real world observation. 
-- fix: added 1 second a drain time to drain messages sent after target found. Also added position message for robot after communicating target.
-- Needs checking. If not fixed then it is an artifact of using a different measurement. Not sure why that would be. 
-TODO: robot logs 1 more message sent by each robot than hub counts. Due to initial location pulse.
-fix: hoping that message drain above will fix this issue as well. verified that robot does not track message counts prior to start signal. 
-- Needs checking
-TODO: Robots are double checking for clues and logging misses when a clue has already been found at that location. 
-fix: edited robot search loop to check if clue detected in that area previously before checking at_intersection_and_white(). Now has a guard before checking function.  
-- Needs checking and make sure function of code isnt altered. 
-TODO: removed if grid[i] == CELL_OBSTACLE:
-                clue_p[i] = 0.0
-                continue
-from clue_probability_field() in all 3 algorithms. This was preventing clues from being registered on obstacle cells. 
-- Needs checking to make sure behavior isn't erradic.
-TODO: Removed intent penalty code from Auction-Greedy.py to prevent robots from incorportating a penalty based on current and intended locaiton of 
-peers into path planning. 
-- Need to implement peer intent on dynamic-partitioning and voronoi-partitioning.
-- Peer intent alted to only plan a role in next cell planning and gate in all code. removed full path planning affect on 
-long term path planning on auction-greedy. implemented identical system on all code. 
-- Needs checking to verify behavior. Check in chat that changes are correct. 
 """
 
 import csv
@@ -403,4 +382,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
