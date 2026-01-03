@@ -25,13 +25,34 @@ This script folds the old "locations" file into:
 
 Clue/target messages are still printed live to the terminal during the trial, but all
 CSV fields are written only once at the end of the trial.
+
+TODO: fix 2 step discrepancy in logging compared to robot metric and real world observation. 
+- fix: added 1 second a drain time to drain messages sent after target found. Also added position message for robot after communicating target.
+- Needs checking. If not fixed then it is an artifact of using a different measurement. Not sure why that would be. 
+TODO: robot logs 1 more message sent by each robot than hub counts. Due to initial location pulse.
+fix: hoping that message drain above will fix this issue as well. verified that robot does not track message counts prior to start signal. 
+- Needs checking
+TODO: Robots are double checking for clues and logging misses when a clue has already been found at that location. 
+fix: edited robot search loop to check if clue detected in that area previously before checking at_intersection_and_white(). Now has a guard before checking function.  
+- Needs checking and make sure function of code isnt altered. 
+TODO: removed if grid[i] == CELL_OBSTACLE:
+                clue_p[i] = 0.0
+                continue
+from clue_probability_field() in all 3 algorithms. This was preventing clues from being registered on obstacle cells. 
+- Needs checking to make sure behavior isn't erradic.
+TODO: Removed intent penalty code from Auction-Greedy.py to prevent robots from incorportating a penalty based on current and intended locaiton of 
+peers into path planning. 
+- Need to implement peer intent on dynamic-partitioning and voronoi-partitioning.
+- Peer intent alted to only plan a role in next cell planning and gate in all code. removed full path planning affect on 
+long term path planning on auction-greedy. implemented identical system on all code. 
+- Needs checking to verify behavior. Check in chat that changes are correct. 
 """
 
 import csv
 import os
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import paho.mqtt.client as mqtt
 
@@ -40,7 +61,8 @@ BROKER_HOST = "192.168.1.10"
 BROKER_PORT = 1883
 
 HUB_COMMAND_TOPIC = "hub/command"
-START_PAYLOAD = "1"
+PRE_START_PAYLOAD = "1"
+START_PAYLOAD = "2"
 
 ROBOT_IDS = ["00", "01", "02", "03"]
 VALID_DIGITS = set("123456")
@@ -133,6 +155,10 @@ def main() -> None:
     ensure_dir(OUT_DIR)
 
     # Trial state
+    attendance: Set[str] = set()  # robots seen via pre-start topic 1
+    pre_start_sent = False
+    start_sent = False
+    last_msg_time = now_s()
     t0 = None  # set right before publishing start
     t_first_clue = None
     first_clue_loc = None
@@ -166,6 +192,7 @@ def main() -> None:
             else:
                 rs["visited"].add(cell)
             mark_team_visit(cell)
+            rs["steps_total"] += 1
             return
 
         if cell == rs["last_pos"]:
@@ -233,6 +260,20 @@ def main() -> None:
         rid, dig = parsed
         payload = msg.payload.decode(errors="ignore")
 
+        # Pre-start attendance: only capture topic 1 to seed last_pos, ignore counts
+        if not start_sent:
+            last_msg_time = now_s()
+            if pre_start_sent:
+                return
+            elif dig == "1":
+                attendance.add(rid)
+                cell = parse_coord(payload)
+                if cell is not None:
+                    robots[rid]["last_pos"] = cell
+                    robots[rid]["visited"].add(cell)
+                    mark_team_visit(cell)
+            return
+
         # message counts
         msg_total_system += 1
         msg_total_by_digit[dig] += 1
@@ -264,7 +305,23 @@ def main() -> None:
     # Start MQTT loop
     client.loop_start()
 
-    # Start trial at t=0
+    # Wait for attendance (position heartbeats) from all robots
+    print("[RUN] Waiting for attendance (topic 1) from all robots...")
+    while len(attendance) < len(ROBOT_IDS):
+        time.sleep(0.05)
+
+    pre_start_sent = True
+    client.publish(HUB_COMMAND_TOPIC, PRE_START_PAYLOAD, qos=0, retain=False)
+    time.sleep(2)  # give robots time to process pre-start
+    # Wait for a quiet window with no incoming messages
+    print("[RUN] All robots present. Sending pre-start '1'. Waiting for quiet...")
+    QUIET_WINDOW_S = 1.0
+    while True:
+        time.sleep(0.05)
+        if now_s() - last_msg_time >= QUIET_WINDOW_S:
+            break
+
+    start_sent = True
     t0 = now_s()
     client.publish(HUB_COMMAND_TOPIC, START_PAYLOAD, qos=0, retain=False)
     print('[RUN] Published hub/command "1" (t=0.000s)')
@@ -273,7 +330,7 @@ def main() -> None:
     try:
         while not done_flag:
             time.sleep(0.01)
-        while abs(now_s()-drain_time) < 1.0:
+        while abs(now_s()-drain_time) < 5.0:
             time.sleep(0.01)
     except KeyboardInterrupt:
         print("\n[RUN] Interrupted. No files written.")
@@ -382,5 +439,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
